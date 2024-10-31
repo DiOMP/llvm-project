@@ -2,7 +2,7 @@
 
 IF(NOT GASNET_ROOT)
     MESSAGE(STATUS "GASNET_LIB is not set.")
-    set(GASNET_ROOT "/home/l1065028/gasnet-arm-cuda")
+    set(GASNET_ROOT "/global/cfs/cdirs/xpress/baodi/software/gasnet-gpu/")
 ENDIF()
 
 IF(NOT HWLOC_LIB)
@@ -15,10 +15,10 @@ IF(OPENMP_ENABLE_DIOMP_DEVICE)
   MESSAGE(STATUS "Building DiOMP device plugin")
 ENDIF()
 
-set(GASNET_IBV_INCLUDE "${GASNET_ROOT}/include/ibv-conduit/" "/hrtc/apps/cuda/11.2.152/x86_64/lib")
+set(GASNET_OFI_INCLUDE "${GASNET_ROOT}/include/ofi-conduit/")
 set(GASNET_LIB "${GASNET_ROOT}/lib")
 set(CUDA_HOME "/hrtc/apps/cuda/11.2.152/x86_64")
-include_directories(${GASNET_IBV_INCLUDE})
+include_directories(${GASNET_OFI_INCLUDE})
 link_directories(${GASNET_LIB} ${HWLOC_LIB})
 
 
@@ -27,8 +27,13 @@ add_library(diomp SHARED
   src/diompmem.cpp
 )
 
-target_link_libraries(diomp -lcuda -lcudart -lmpi -fopenmp --offload-arch=sm_90
--lrt -lgasnet-ibv-par -lhwloc -pthread -libverbs)
+# #clang++ diomp_lat.cpp -ldiomp -fopenmp -L /global/cfs/cdirs/xpress/baodi/software/llvm/diomp/lib -L /global/cfs/cdirs/xpress/baodi/software/gasnet/lib -I /global/cfs/cdirs/xpress/baodi/software/gasnet/include/ofi-conduit/ -lgasnet-ofi-par -no-pie -lmpi -lhwloc -lrt -pthread -I /opt/cray/pe/mpich/8.1.28/ofi/gnu/12.3/include -L /opt/cray/pe/mpich/8.1.28/ofi/gnu/12.3/lib -L/opt/cray/libfabric/1.15.2.0/lib64 -lfabric -L /opt/cray/pe/pmi/6.1.13/lib -lpmi -lhugetlbfs -o diomp_lat_put
+target_link_libraries(diomp 
+-I/opt/cray/pe/mpich/8.1.28/ofi/gnu/12.3/include
+-L/opt/cray/libfabric/1.15.2.0/lib64 -lfabric -L/opt/cray/pe/pmi/6.1.13/lib -lpmi
+-L/opt/cray/pe/mpich/8.1.28/ofi/gnu/12.3/lib 
+-lcuda -lmpi -fopenmp --offload-arch=sm_80
+-lrt -lgasnet-ofi-par -lhwloc -pthread -lhugetlbfs)
 
 target_include_directories(diomp
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

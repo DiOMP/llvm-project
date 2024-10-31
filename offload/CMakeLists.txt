@@ -123,7 +123,7 @@ endif()
 
 # Get dependencies for the different components of the project.
 include(LibomptargetGetDependencies)
-
+include(CheckCXXCompilerFlag)
 # Set up testing infrastructure.
 include(OpenMPTesting)
 
