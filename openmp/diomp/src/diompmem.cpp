@@ -113,14 +113,14 @@ void *MemoryManager::globalAlloc(size_t Size) {
   void *Ptr = LocalSegRemain;
   LocalSegRemain = reinterpret_cast<char *>(LocalSegRemain) + Size;
   MemBlocks.push_back({Ptr, Size});
-
   return Ptr;
 }
 
 void *MemoryManager::deviceAlloc(size_t Size, int DeviceID) {
   if (tmpRemain == reinterpret_cast<uintptr_t>(nullptr)) {
-    tmpRemain = reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(MyRank, DeviceID)) + Size;
-    return getDeviceSegmentAddr(MyRank, DeviceID);
+    void *res = getDeviceSegmentAddr(MyRank, DeviceID);
+    tmpRemain = reinterpret_cast<uintptr_t>(res) + Size;
+    return res;
   }
   uintptr_t res = tmpRemain;
   tmpRemain = tmpRemain + Size;
