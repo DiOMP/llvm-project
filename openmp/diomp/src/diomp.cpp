@@ -86,7 +86,7 @@ size_t convertToBytes(const std::string &sizeStr) {
 size_t getOMPDistributedSize() {
   const char *envValue = std::getenv("OMP_DISTRIBUTED_MEM_SIZE");
   if (envValue == nullptr) {
-    size_t bytes = 4ULL * 1024 * 1024 * 1024; // Default: 4GB
+    size_t bytes = 4ULL * 1024 * 1024 * 1024 * 12; // Default: 4GB
     return bytes;
   }
   std::string valueStr(envValue);
