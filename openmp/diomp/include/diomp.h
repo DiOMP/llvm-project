@@ -19,6 +19,15 @@
 #include <gasnet_coll.h>
 #include <gasnet_tools.h>
 #include <gasnetex.h>
+
+#ifdef DIOMP_ENABLE_CUDA
+
+#include <cuda_runtime.h>
+#include <nccl.h>
+
+#endif
+
+
 #ifdef __cplusplus
 
 extern "C" {
@@ -76,6 +85,39 @@ typedef enum omp_event {
 } omp_event_t;
 
 
+#ifdef DIOMP_ENABLE_CUDA
+
+typedef enum omp_device_dt {
+  // Integer types:
+  ompx_d_int8 = ncclInt8,
+  ompx_d_uint8 = ncclUint8,
+  ompx_d_int32 = ncclInt32,
+  ompx_d_uint32 = ncclUint32,
+  ompx_d_int64 = ncclInt64,
+  ompx_d_uint64 = ncclUint64,
+  ompx_d_int = ncclInt,
+  
+  // Floating-point types:
+  ompx_d_float16 = ncclFloat16,
+  ompx_d_half = ncclHalf,
+  ompx_d_float32 = ncclFloat32,
+  ompx_d_float = ncclFloat,
+  ompx_d_float64 = ncclFloat64,
+  ompx_d_double = ncclDouble,
+  ompx_d_bfloat16 = ncclBfloat16,
+
+} omp_device_dt_t;
+
+typedef enum omp_red_op {
+  ompx_d_sum = ncclSum,
+  ompx_d_prod = ncclProd,
+  ompx_d_min = ncclMin,
+  ompx_d_max = ncclMax,
+  ompx_d_avg = ncclAvg,
+} omp_red_op_t;
+
+#endif
+
 extern gex_TM_t diompTeam;
 extern gex_Client_t diompClient;
 extern gex_EP_t diompEp;
@@ -98,11 +140,11 @@ void *omp_get_space(int node);
 uintptr_t omp_get_length_space(int node);
 void* llvm_omp_distributed_alloc(size_t Size);
 
-void omp_get(void *dst, int node, void *src, size_t nbytes);
-void omp_put(int node, void *dst, void *src, size_t nbytes);
+void ompx_get(void *dst, int node, void *src, size_t nbytes);
+void ompx_put(int node, void *dst, void *src, size_t nbytes);
 
-void omp_dget(void *dst, int node, void *src, size_t nbytes);
-void omp_dput(void *dst, int node, void *src, size_t nbytes);
+void ompx_dget(void *dst, int node, void *src, size_t nbytes, int dst_id, int src_id);
+void ompx_dput(void *dst, int node, void *src, size_t nbytes, int dst_id, int src_id);
 
 void diomp_barrier();
 void diomp_waitALLRMA();
@@ -112,9 +154,15 @@ void diomp_unlock(int Rank);
 
 void omp_bcast(void *data, size_t nbytes, int node);
 // Experimental. Only for benchmark
+
 void omp_allreduce(void *src, void *dst, size_t count, omp_dt_t dt, omp_op_t op);
+void omp_reduce(void *src, void *dst, size_t count, omp_dt_t dt, omp_op_t op, int root);
 
-
+#ifdef DIOMP_ENABLE_CUDA
+void ompx_dbcast(void *data, size_t count, omp_device_dt_t dt, int node, int dst_id);
+void ompx_dallreduce(void *src, void *dst, size_t count, omp_device_dt_t dt, omp_red_op_t op, int dst_id);
+void ompx_dreduce(void *src, void *dst, size_t count, omp_device_dt_t dt, omp_red_op_t op, int root, int dst_id);
+#endif
 
 #ifdef __cplusplus
 }

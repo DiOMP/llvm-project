@@ -118,13 +118,17 @@ void *MemoryManager::globalAlloc(size_t Size) {
 
 void *MemoryManager::deviceAlloc(size_t Size, int DeviceID) {
   if (tmpRemain == reinterpret_cast<uintptr_t>(nullptr)) {
-    void *res = getDeviceSegmentAddr(MyRank, DeviceID);
-    tmpRemain = reinterpret_cast<uintptr_t>(res) + Size;
-    return res;
+    void *Res = getDeviceSegmentAddr(MyRank, DeviceID);
+    tmpRemain = reinterpret_cast<uintptr_t>(Res) + Size;
+    return Res;
   }
-  uintptr_t res = tmpRemain;
+  uintptr_t Res = tmpRemain;
   tmpRemain = tmpRemain + Size;
-  return (void *)res;
+  return (void *)Res;
+}
+
+void MemoryManager::deviceDealloc() { 
+  tmpRemain = reinterpret_cast<uintptr_t>(nullptr);
 }
 
 size_t MemoryManager::getDeviceAvailableSize() const {

@@ -74,6 +74,7 @@ class MemoryManager {
 
     void *globalAlloc(size_t Size);
     void *deviceAlloc(size_t Size, int DeviceID);
+    void deviceDealloc();
 
     size_t getAvailableSize() const;
     size_t getDeviceAvailableSize() const;
@@ -86,8 +87,6 @@ class MemoryManager {
     void *convertLocaltoRemoteAddr(void *Ptr, int Rank, int DeviceID);
 
     gex_EP_t getEP(int DeviceID);
-
-
 
 };
 

@@ -15,9 +15,22 @@ IF(OPENMP_ENABLE_DIOMP_DEVICE)
   MESSAGE(STATUS "Building DiOMP device plugin")
 ENDIF()
 
-set(GASNET_IBV_INCLUDE "${GASNET_ROOT}/include/ibv-conduit/" "/hrtc/apps/cuda/11.2.152/x86_64/lib")
+set(GASNET_IBV_INCLUDE "${GASNET_ROOT}/include/ibv-conduit/" "/hrtc/apps/cuda/12.4.131/aarch64/rocky9/lib64")
 set(GASNET_LIB "${GASNET_ROOT}/lib")
-set(CUDA_HOME "/hrtc/apps/cuda/11.2.152/x86_64")
+set(CUDA_HOME "/hrtc/apps/cuda/12.4.131/aarch64/rocky9")
+set(NCCL_HOME "/hrtc/apps/devtools/nvidia-hpcsdk/aarch64/24.5-cuda12.4.131//Linux_aarch64/24.5/comm_libs/nccl/")
+
+
+
+
+IF(OPENMP_DIOMP_ENABLE_CUDA)
+  add_definitions(-DDIOMP_ENABLE_CUDA)
+  MESSAGE(STATUS "Building DiOMP with CUDA support")
+  include_directories(${CUDA_HOME}/include ${NCCL_HOME}/include)
+  link_directories(${CUDA_HOME}/lib64 ${NCCL_HOME}/lib)
+ENDIF()
+
+
 include_directories(${GASNET_IBV_INCLUDE})
 link_directories(${GASNET_LIB} ${HWLOC_LIB})
 
@@ -28,7 +41,7 @@ add_library(diomp SHARED
 )
 
 target_link_libraries(diomp -lcuda -lcudart -lmpi -fopenmp --offload-arch=sm_90
--lrt -lgasnet-ibv-par -lhwloc -pthread -libverbs)
+-lrt -lgasnet-ibv-par -lhwloc -pthread -libverbs -lnccl)
 
 target_include_directories(diomp
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include

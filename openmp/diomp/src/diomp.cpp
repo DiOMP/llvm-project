@@ -26,8 +26,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include <omp.h>
 #include "omptarget.h"
+#include <omp.h>
 
 std::unique_ptr<diomp::MemoryManager> MemManager;
 gex_TM_t diompTeam;
@@ -39,6 +39,32 @@ std::atomic<int> LockState{0};
 std::vector<int> LockQueues;
 std::mutex lockQueueMutex;
 std::atomic<int> flag_lock{0}; // 0: initial, 1: locked, 2: occupied
+
+#ifdef DIOMP_ENABLE_CUDA
+
+ncclComm_t NcclComm;
+cudaStream_t NcclStream;
+
+// Per process multiple devices
+
+cudaStream_t *NcclStreams;
+ncclComm_t *NcclComms;
+
+void CUDACHECK(cudaError_t result, const char *msg) {
+  if (result != cudaSuccess) {
+    THROW_ERROR("CUDA Error: %s", cudaGetErrorString(result));
+    exit(EXIT_FAILURE);
+  }
+}
+
+void NCCLCHECK(ncclResult_t result) {
+  if (result != ncclSuccess) {
+    THROW_ERROR("CUDA Error: %s", ncclGetErrorString(result));
+    exit(EXIT_FAILURE);
+  }
+}
+
+#endif
 
 size_t convertToBytes(const std::string &sizeStr) {
   if (sizeStr.empty()) {
@@ -86,7 +112,7 @@ size_t convertToBytes(const std::string &sizeStr) {
 size_t getOMPDistributedSize() {
   const char *envValue = std::getenv("OMP_DISTRIBUTED_MEM_SIZE");
   if (envValue == nullptr) {
-    size_t bytes = 4ULL * 1024 * 1024 * 1024 * 12; // Default: 4GB
+    size_t bytes = 4ULL * 1024 * 1024 * 1024; // Default: 4GB
     return bytes;
   }
   std::string valueStr(envValue);
@@ -161,21 +187,58 @@ void __init_diomp_target() {
   gex_EP_RegisterHandlers(diompEp, AMTable,
                           sizeof(AMTable) / sizeof(gex_AM_Entry_t));
   MemManager = std::make_unique<diomp::MemoryManager>(diompTeam);
-  // Setup DiOMP Allocator
 
+  // Setup DiOMP Allocator
   for (int DeviceID = 0; DeviceID < omp_get_num_devices(); DeviceID++) {
-    omp_target_setup_diompallocator(DeviceID, (void*)diomp_device_alloc, (void*)diomp_device_dealloc);
+    omp_target_setup_diompallocator(DeviceID, (void *)diomp_device_alloc,
+                                    (void *)diomp_device_dealloc);
   }
+
+#ifdef DIOMP_ENABLE_CUDA
+  ncclUniqueId ncclID;
+  int DevicesNum = omp_get_num_devices();
+  if (DevicesNum > 1) {
+    NcclStreams = (cudaStream_t *)malloc(sizeof(cudaStream_t) * DevicesNum);
+    NcclComms = (ncclComm_t *)malloc(sizeof(ncclComm_t) * DevicesNum);
+  }
+
+  if (omp_get_rank_num() == 0)
+    ncclGetUniqueId(&ncclID);
+
+  // Broadcast NCCL unique ID
+  gex_Event_Wait(
+      gex_Coll_BroadcastNB(diompTeam, 0, &ncclID, &ncclID, sizeof(ncclID), 0));
+
+  // Initialize NCCL communicator & CUDA stream
+  if (DevicesNum == 1) {
+    NCCLCHECK(ncclCommInitRank(&NcclComm, omp_get_num_ranks(), ncclID,
+                               omp_get_rank_num()));
+    CUDACHECK(cudaStreamCreate(&NcclStream), "Creating CUDA stream");
+  } else {
+    NCCLCHECK(ncclGroupStart());
+    // ncclCommInitRank(comms+i, nRanks*nDev, id, myRank*nDev + i)
+    for (int DeviceID = 0; DeviceID < DevicesNum; DeviceID++) {
+      CUDACHECK(cudaSetDevice(DeviceID), "Setting CUDA device");
+      NCCLCHECK(ncclCommInitRank(&NcclComms[DeviceID],
+                                 omp_get_num_ranks() * DeviceID, ncclID,
+                                 omp_get_rank_num() * DevicesNum + DeviceID));
+      CUDACHECK(cudaStreamCreate(&NcclStreams[DeviceID]),
+                "Creating CUDA stream");
+    }
+    NCCLCHECK(ncclGroupEnd());
+  }
+
+#endif
 }
 
-void *diomp_device_alloc(size_t Size, int DeviceId){
-  void* MemAddr = nullptr;
+void *diomp_device_alloc(size_t Size, int DeviceId) {
+  void *MemAddr = nullptr;
   MemAddr = MemManager->deviceAlloc(Size, DeviceId);
   return MemAddr;
 }
 
-void diomp_device_dealloc(){
-
+void diomp_device_dealloc() {
+  MemManager->deviceDealloc();
   return;
 }
 
@@ -207,7 +270,7 @@ template <typename T> void *diomp_alloc(size_t Size) {
 
 // RMA Operations
 // Get data from a remote node
-void omp_get(void *dest, int node, void *src, size_t nbytes) {
+void ompx_get(void *dest, int node, void *src, size_t nbytes) {
   auto Error = gex_RMA_GetNBI(diompTeam, dest, node, src, nbytes, 0);
   if (Error != 0) {
     THROW_ERROR("OpenMP GET Error! Error code is %d", Error);
@@ -215,7 +278,7 @@ void omp_get(void *dest, int node, void *src, size_t nbytes) {
 }
 
 // Put data to a remote node
-void omp_put(int node, void *dest, void *src, size_t nbytes) {
+void ompx_put(int node, void *dest, void *src, size_t nbytes) {
   auto Error =
       gex_RMA_PutNBI(diompTeam, node, dest, src, nbytes, GEX_EVENT_DEFER, 0);
   if (Error != 0) {
@@ -223,25 +286,34 @@ void omp_put(int node, void *dest, void *src, size_t nbytes) {
   }
 }
 
-void omp_dget(void *dest, int node, void *src, size_t nbytes) {
-  auto tmpEP = MemManager->getEP(0);
-  gex_EP_Index_t EPIdx = gex_EP_QueryIndex(tmpEP);
-  gex_TM_t tmpTM = gex_TM_Pair(tmpEP, EPIdx);
-  void *srcR = MemManager->convertLocaltoRemoteAddr(src, node, 0);
-  auto Error = gex_RMA_GetNBI(tmpTM, dest, node, srcR, nbytes, 0);
+void ompx_dget(void *dest, int node, void *src, size_t nbytes, int dst_id,
+               int src_id) {
+  auto LocalEP = MemManager->getEP(dst_id);
+  auto RemoteEP = MemManager->getEP(src_id);
+
+  gex_EP_Index_t RemoteIdx = gex_EP_QueryIndex(RemoteEP);
+  gex_TM_t CommTM = gex_TM_Pair(LocalEP, RemoteIdx);
+
+  void *SrcR = MemManager->convertLocaltoRemoteAddr(src, node, src_id);
+  auto Error = gex_RMA_GetNBI(CommTM, dest, node, SrcR, nbytes, 0);
   if (Error != 0) {
-    THROW_ERROR("OpenMP DPUT Error! Error code is %d", Error);
+    THROW_ERROR("OpenMP Device PUT Error! Error code is %d", Error);
   }
+
   return;
 }
 
-void omp_dput(void *dest, int node, void *src, size_t nbytes) {
-  auto tmpEP = MemManager->getEP(0);
-  gex_EP_Index_t EPIdx = gex_EP_QueryIndex(tmpEP);
-  gex_TM_t tmpTM = gex_TM_Pair(tmpEP, EPIdx);
-  void *destR = MemManager->convertLocaltoRemoteAddr(dest, node, 0);
+void ompx_dput(void *dest, int node, void *src, size_t nbytes, int dst_id,
+               int src_id) {
+  auto LocalEP = MemManager->getEP(src_id);
+  auto RemoteEP = MemManager->getEP(dst_id);
+
+  gex_EP_Index_t RemoteIdx = gex_EP_QueryIndex(RemoteEP);
+  gex_TM_t CommTM = gex_TM_Pair(LocalEP, RemoteIdx);
+
+  void *DestR = MemManager->convertLocaltoRemoteAddr(dest, node, dst_id);
   auto Error =
-    gex_RMA_PutNBI(tmpTM, node, destR, src, nbytes, GEX_EVENT_DEFER, 0);
+      gex_RMA_PutNBI(CommTM, node, DestR, src, nbytes, GEX_EVENT_DEFER, 0);
   if (Error != 0) {
     THROW_ERROR("OpenMP DPUT Error! Error code is %d", Error);
   }
@@ -283,3 +355,36 @@ void omp_allreduce(void *src, void *dst, size_t count, omp_dt_t dt,
   gex_Event_Wait(gex_Coll_ReduceToAllNB(diompTeam, dst, src, dt, sizeof(dt),
                                         count, op, NULL, NULL, 0));
 }
+
+void omp_reduce(void *src, void *dst, size_t count, omp_dt_t dt, omp_op_t op,
+                int root) {
+  gex_Event_Wait(gex_Coll_ReduceToOneNB(diompTeam, root, dst, src, dt,
+                                        sizeof(dt), count, op, NULL, NULL, 0));
+}
+
+#ifdef DIOMP_ENABLE_CUDA
+
+void ompx_dbcast(void *data, size_t count, omp_device_dt_t dt, int node,
+                 int dst_id) {
+  CUDACHECK(cudaSetDevice(dst_id), "Setting CUDA device");
+  NCCLCHECK(
+      ncclBcast(data, count, (ncclDataType_t)dt, node, NcclComm, NcclStream));
+  CUDACHECK(cudaStreamSynchronize(0), "Synchronizing stream");
+}
+
+void ompx_dallreduce(void *src, void *dst, size_t count, omp_device_dt_t dt,
+                     omp_red_op_t op, int dst_id) {
+  CUDACHECK(cudaSetDevice(dst_id), "Setting CUDA device");
+  NCCLCHECK(ncclAllReduce(src, dst, count, (ncclDataType_t)dt, (ncclRedOp_t)op,
+                          NcclComm, NcclStream));
+  CUDACHECK(cudaStreamSynchronize(0), "Synchronizing stream");
+}
+void ompx_dreduce(void *src, void *dst, size_t count, omp_device_dt_t dt,
+                  omp_red_op_t op, int root, int dst_id) {
+  CUDACHECK(cudaSetDevice(dst_id), "Setting CUDA device");
+  NCCLCHECK(ncclReduce(src, dst, count, (ncclDataType_t)dt, (ncclRedOp_t)op,
+                       root, NcclComm, NcclStream));
+  CUDACHECK(cudaStreamSynchronize(0), "Synchronizing stream");
+}
+
+#endif
