@@ -80,6 +80,7 @@ class MemoryManager {
     size_t getDeviceAvailableSize() const;
     size_t getOffset(void *Ptr); // Compute ptr on local memory
     size_t getOffset(void *Ptr, int Rank); // Compute ptr on remote memory
+    size_t getDeviceOffset(void *Ptr);
 
     bool validGlobalAddr(void *Ptr, int Rank);
     void *convertRemotetoLocalAddr(void *Ptr, int Rank, int DeviceID);

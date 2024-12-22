@@ -112,7 +112,7 @@ size_t convertToBytes(const std::string &sizeStr) {
 size_t getOMPDistributedSize() {
   const char *envValue = std::getenv("OMP_DISTRIBUTED_MEM_SIZE");
   if (envValue == nullptr) {
-    size_t bytes = 4ULL * 1024 * 1024 * 1024; // Default: 4GB
+    size_t bytes = 12ULL * 1024 * 1024 * 1024; // Default: 4GB
     return bytes;
   }
   std::string valueStr(envValue);
@@ -286,6 +286,11 @@ void ompx_put(int node, void *dest, void *src, size_t nbytes) {
   }
 }
 
+void get_offset(void *Ptr) {
+  size_t Offset = MemManager->getDeviceOffset(Ptr);
+  printf("Offset: %llu\n", Offset);
+}
+
 void ompx_dget(void *dest, int node, void *src, size_t nbytes, int dst_id,
                int src_id) {
   auto LocalEP = MemManager->getEP(dst_id);
@@ -312,6 +317,7 @@ void ompx_dput(void *dest, int node, void *src, size_t nbytes, int dst_id,
   gex_TM_t CommTM = gex_TM_Pair(LocalEP, RemoteIdx);
 
   void *DestR = MemManager->convertLocaltoRemoteAddr(dest, node, dst_id);
+  // printf("DestR %p\n", DestR);
   auto Error =
       gex_RMA_PutNBI(CommTM, node, DestR, src, nbytes, GEX_EVENT_DEFER, 0);
   if (Error != 0) {

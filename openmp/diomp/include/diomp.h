@@ -146,6 +146,8 @@ void ompx_put(int node, void *dst, void *src, size_t nbytes);
 void ompx_dget(void *dst, int node, void *src, size_t nbytes, int dst_id, int src_id);
 void ompx_dput(void *dst, int node, void *src, size_t nbytes, int dst_id, int src_id);
 
+void get_offset(void *Ptr);
+
 void diomp_barrier();
 void diomp_waitALLRMA();
 void diomp_waitRMA(omp_event_t ev);
