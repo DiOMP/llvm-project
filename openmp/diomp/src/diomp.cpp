@@ -57,12 +57,14 @@ void CUDACHECK(cudaError_t result, const char *msg) {
   }
 }
 
-void NCCLCHECK(ncclResult_t result) {
-  if (result != ncclSuccess) {
-    THROW_ERROR("CUDA Error: %s", ncclGetErrorString(result));
-    exit(EXIT_FAILURE);
-  }
-}
+#define NCCLCHECK(cmd) do {                         \
+  ncclResult_t res = cmd;                           \
+  if (res != ncclSuccess) {                         \
+    printf("Failed, NCCL error %s:%d '%s'\n",       \
+        __FILE__,__LINE__,ncclGetErrorString(res)); \
+    exit(EXIT_FAILURE);                             \
+  }                                                 \
+} while(0)
 
 #endif
 
@@ -112,7 +114,7 @@ size_t convertToBytes(const std::string &sizeStr) {
 size_t getOMPDistributedSize() {
   const char *envValue = std::getenv("OMP_DISTRIBUTED_MEM_SIZE");
   if (envValue == nullptr) {
-    size_t bytes = 12ULL * 1024 * 1024 * 1024; // Default: 4GB
+    size_t bytes = 16ULL * 1024 * 1024 * 1024; // Default: 16GB
     return bytes;
   }
   std::string valueStr(envValue);
@@ -211,6 +213,7 @@ void __init_diomp_target() {
 
   // Initialize NCCL communicator & CUDA stream
   if (DevicesNum == 1) {
+    CUDACHECK(cudaSetDevice(0), "Setting CUDA device");
     NCCLCHECK(ncclCommInitRank(&NcclComm, omp_get_num_ranks(), ncclID,
                                omp_get_rank_num()));
     CUDACHECK(cudaStreamCreate(&NcclStream), "Creating CUDA stream");
@@ -220,7 +223,7 @@ void __init_diomp_target() {
     for (int DeviceID = 0; DeviceID < DevicesNum; DeviceID++) {
       CUDACHECK(cudaSetDevice(DeviceID), "Setting CUDA device");
       NCCLCHECK(ncclCommInitRank(&NcclComms[DeviceID],
-                                 omp_get_num_ranks() * DeviceID, ncclID,
+                                 omp_get_num_ranks() * DevicesNum, ncclID,
                                  omp_get_rank_num() * DevicesNum + DeviceID));
       CUDACHECK(cudaStreamCreate(&NcclStreams[DeviceID]),
                 "Creating CUDA stream");
@@ -372,10 +375,24 @@ void omp_reduce(void *src, void *dst, size_t count, omp_dt_t dt, omp_op_t op,
 
 void ompx_dbcast(void *data, size_t count, omp_device_dt_t dt, int node,
                  int dst_id) {
-  CUDACHECK(cudaSetDevice(dst_id), "Setting CUDA device");
-  NCCLCHECK(
-      ncclBcast(data, count, (ncclDataType_t)dt, node, NcclComm, NcclStream));
-  CUDACHECK(cudaStreamSynchronize(0), "Synchronizing stream");
+  int DevicesNum = omp_get_num_devices();
+  if(DevicesNum == 1){
+    CUDACHECK(cudaSetDevice(dst_id), "Setting CUDA device");
+    NCCLCHECK(
+        ncclBcast(data, count, (ncclDataType_t)dt, node, NcclComm, NcclStream));
+    CUDACHECK(cudaStreamSynchronize(0), "Synchronizing stream");
+    return;
+  }
+  NCCLCHECK(ncclGroupStart());
+  for (int i = 0; i < DevicesNum; i++){
+    void *tmp = MemManager->convertLocaltoRemoteAddr(data, omp_get_rank_num(), dst_id);
+    NCCLCHECK(
+        ncclBcast(tmp, count, (ncclDataType_t)dt, node * DevicesNum + dst_id, NcclComms[i], NcclStreams[i]));
+  }
+  NCCLCHECK(ncclGroupEnd());
+  for (int i = 0; i < DevicesNum; i++){
+    CUDACHECK(cudaStreamSynchronize(NcclStreams[i]), "Synchronizing streams");
+  }
 }
 
 void ompx_dallreduce(void *src, void *dst, size_t count, omp_device_dt_t dt,
@@ -385,6 +402,7 @@ void ompx_dallreduce(void *src, void *dst, size_t count, omp_device_dt_t dt,
                           NcclComm, NcclStream));
   CUDACHECK(cudaStreamSynchronize(0), "Synchronizing stream");
 }
+
 void ompx_dreduce(void *src, void *dst, size_t count, omp_device_dt_t dt,
                   omp_red_op_t op, int root, int dst_id) {
   CUDACHECK(cudaSetDevice(dst_id), "Setting CUDA device");

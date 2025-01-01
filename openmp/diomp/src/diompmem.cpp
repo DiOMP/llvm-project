@@ -117,31 +117,30 @@ void *MemoryManager::globalAlloc(size_t Size) {
 }
 
 void *MemoryManager::deviceAlloc(size_t Size, int DeviceID) {
-  // 静态变量用于跟踪最大地址和当前剩余空间
-  static uintptr_t MaxAddr = 0;      // 最大允许分配地址
-  static uintptr_t tmpRemain = 0;    // 当前剩余空间起始地址
+  // Assuming tmpRemain is a class member variable, initialized to 0
+  static const size_t ALIGNMENT = 16; // Example: 16-byte alignment
+  static uintptr_t MaxAddr = 0;      // Tracks the maximum allowed address
 
-  // 初始化内存段
+  // Initialize tmpRemain if it is uninitialized
   if (tmpRemain == 0) {
     void *Res = getDeviceSegmentAddr(MyRank, DeviceID);
     if (!Res) {
       THROW_ERROR("Failed to get device segment address");
     }
-    tmpRemain = reinterpret_cast<uintptr_t>(Res);          // 初始化为段基地址
-    MaxAddr = tmpRemain + getDeviceAvailableSize();        // 初始化最大地址
+    tmpRemain = reinterpret_cast<uintptr_t>(Res);
+    MaxAddr = tmpRemain + getSegmentSpace(MyRank); // Assume this gets the segment size
   }
 
-  // 检查是否有足够的空间
-  if (tmpRemain + Size > MaxAddr) {
-    throw std::bad_alloc(); // 分配超出内存范围
+  // Ensure the address is properly aligned
+  uintptr_t Res = (tmpRemain + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1);
+  if (Res + Size > MaxAddr) {
+    throw std::bad_alloc(); // Allocation exceeds the available memory
   }
 
-  // 分配内存
-  uintptr_t Res = tmpRemain; // 当前剩余地址即为分配地址
-  tmpRemain += Size;         // 更新剩余空间起始地址
-
-  return reinterpret_cast<void *>(Res); // 返回分配的地址
+  tmpRemain = Res + Size;
+  return reinterpret_cast<void *>(Res);
 }
+
 
 void MemoryManager::deviceDealloc() { 
   tmpRemain = reinterpret_cast<uintptr_t>(nullptr);
