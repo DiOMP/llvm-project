@@ -58,10 +58,10 @@ void CUDACHECK(cudaError_t result, const char *msg) {
 }
 
 #define NCCLCHECK(cmd) do {                         \
-  ncclResult_t res = cmd;                           \
-  if (res != ncclSuccess) {                         \
-    printf("Failed, NCCL error %s:%d '%s'\n",       \
-        __FILE__,__LINE__,ncclGetErrorString(res)); \
+  ncclResult_t r = cmd;                             \
+  if (r!= ncclSuccess) {                            \
+    printf("Failed, NCCL error %s:%d '%s'\n",             \
+        __FILE__,__LINE__,ncclGetErrorString(r));   \
     exit(EXIT_FAILURE);                             \
   }                                                 \
 } while(0)
@@ -230,6 +230,7 @@ void __init_diomp_target() {
     }
     NCCLCHECK(ncclGroupEnd());
   }
+  printf("inited!\n");
 
 #endif
 }
