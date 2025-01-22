@@ -104,7 +104,6 @@ typedef enum omp_device_dt {
   ompx_d_float = ncclFloat,
   ompx_d_float64 = ncclFloat64,
   ompx_d_double = ncclDouble,
-  ompx_d_bfloat16 = ncclBfloat16,
 
 } omp_device_dt_t;
 
@@ -126,7 +125,11 @@ extern gex_Segment_t diompSeg;
 //extern std::atomic<size_t> SegSize;
 
 void __init_diomp();
-void __init_diomp_target();
+// Mode:
+// 1: One rank, multiple devices
+// 2: One rank, one device
+void __init_diomp_target(int Mode);
+
 void omp_set_distributed_size(size_t Size);
 
 

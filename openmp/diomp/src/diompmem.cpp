@@ -3,110 +3,28 @@
 
 namespace diomp {
 
-MemoryManager::MemoryManager(gex_TM_t gexTeam) {
+// Base MemoryManager implementation
+MemoryManager::MemoryManager(gex_TM_t gexTeam, int Mode) {
   RanksNum = gex_TM_QuerySize(gexTeam);
   MyRank = gex_TM_QueryRank(gexTeam);
+  this->Mode = Mode;
+  
+  // Initialize segment info
   SegInfo.resize(RanksNum);
   for (auto &Seg : SegInfo) {
     void *SegBase = 0;
     size_t SegSize = 0;
     gex_Event_Wait(gex_EP_QueryBoundSegmentNB(diompTeam, &Seg - &SegInfo[0],
-                                              &SegBase, nullptr, &SegSize, 0));
+                                             &SegBase, nullptr, &SegSize, 0));
     Seg.SegStart = SegBase;
     Seg.SegSize = SegSize;
     Seg.SegRemain = SegBase;
   }
+  
   LocalSegStart = SegInfo[MyRank].SegStart;
   LocalSegRemain = SegInfo[MyRank].SegRemain;
   LocalSegSize = SegInfo[MyRank].SegSize;
-
-#if OPENMP_ENABLE_DIOMP_DEVICE
-  int targetDevicesNum = omp_get_num_devices();
-  DeviceEPs.resize(targetDevicesNum);
-  gex_MK_Create_args_t args;
-
-  args.gex_flags = 0;
-  args.gex_class = GEX_MK_CLASS_CUDA_UVA;
-  gex_MK_t mk_array[targetDevicesNum];
-
-  // Create and bind local segments for each device
-  for (int DeviceID = 0; DeviceID < targetDevicesNum; DeviceID++) {
-    gex_EP_t DeviceEP;
-    args.gex_args.gex_class_cuda_uva.gex_CUdevice = DeviceID;
-    GASNET_Safe(gex_MK_Create(&mk_array[DeviceID], diompClient, &args, 0));
-    void *DeviceSegAddr = omp_target_alloc(LocalSegSize, DeviceID);
-    gex_Segment_t DeviceSeg = GEX_SEGMENT_INVALID;
-    GASNET_Safe(gex_Segment_Create(&DeviceSeg, diompClient, DeviceSegAddr,
-                                   LocalSegSize, mk_array[DeviceID], 0));
-    GASNET_Safe(
-        gex_EP_Create(&DeviceEP, diompClient, GEX_EP_CAPABILITY_RMA, 0));
-    GASNET_Safe(gex_EP_BindSegment(DeviceEP, DeviceSeg, 0));
-    GASNET_Safe(gex_EP_PublishBoundSegment(diompTeam, &DeviceEP, 1, 0));
-    DeviceEPs[DeviceID] = DeviceEP;
-  }
-  DeviceSegInfo.resize(RanksNum,
-                       std::vector<gex_Seginfo_t>(omp_get_num_devices()));
-  for (int MyRank = 0; MyRank < RanksNum; MyRank++) {
-    for (int DeviceID = 0; DeviceID < targetDevicesNum; DeviceID++) {
-      DeviceSegInfo[MyRank][DeviceID].SegStart = nullptr;
-      DeviceSegInfo[MyRank][DeviceID].SegRemain = nullptr;
-      DeviceSegInfo[MyRank][DeviceID].SegSize = 0;
-    }
-  }
-
-#endif
 }
-
-void *MemoryManager::getDeviceSegmentAddr(int Rank, int DeviceID) {
-  if (DeviceSegInfo[Rank][DeviceID].SegStart == nullptr) {
-    gex_EP_Index_t TargetEPIdx = gex_EP_QueryIndex(DeviceEPs[DeviceID]);
-    gex_TM_t TargetTM = gex_TM_Pair(DeviceEPs[0], TargetEPIdx);
-    gex_Event_Wait(gex_EP_QueryBoundSegmentNB(
-        TargetTM, Rank, &DeviceSegInfo[Rank][DeviceID].SegStart, nullptr,
-        &DeviceSegInfo[Rank][DeviceID].SegSize, 0));
-    DeviceSegInfo[Rank][DeviceID].SegRemain =
-        DeviceSegInfo[Rank][DeviceID].SegStart;
-  }
-  return DeviceSegInfo[Rank][DeviceID].SegStart;
-}
-
-// Input:
-// Ptr: Remote address
-// Rank: Rank of the remote address
-// DeviceID: Device ID of the remote address
-// Output:
-// Local address of the remote address
-void *MemoryManager::convertRemotetoLocalAddr(void *Ptr, int Rank,
-                                              int DeviceID) {
-  uintptr_t RemoteBase =
-      reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(Rank, DeviceID));
-  uintptr_t RemoteOffset = reinterpret_cast<uintptr_t>(Ptr) - RemoteBase;
-  return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(LocalSegStart) +
-                                  RemoteOffset);
-}
-
-void *MemoryManager::convertLocaltoRemoteAddr(void *Ptr, int Rank,
-                                              int DeviceID) {
-  uintptr_t LocalBase =
-      reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(MyRank, DeviceID));
-  uintptr_t LocalOffset = reinterpret_cast<uintptr_t>(Ptr) - LocalBase;
-  return reinterpret_cast<void *>(
-      reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(Rank, DeviceID)) +
-      LocalOffset);
-}
-
-void *MemoryManager::convertRemotetoLocalAddr(void *Ptr, int Rank) {
-  uintptr_t RemoteOffset = reinterpret_cast<uintptr_t>(Ptr) -
-                           reinterpret_cast<uintptr_t>(getSegmentAddr(Rank));
-  return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(LocalSegStart) +
-                                  RemoteOffset);
-}
-
-size_t MemoryManager::getSegmentSpace(int Rank) {
-  return SegInfo[Rank].SegSize;
-}
-
-void *MemoryManager::getSegmentAddr(int Rank) { return SegInfo[Rank].SegStart; }
 
 void *MemoryManager::globalAlloc(size_t Size) {
   if (Size > getAvailableSize()) {
@@ -119,14 +37,117 @@ void *MemoryManager::globalAlloc(size_t Size) {
   return Ptr;
 }
 
-void *MemoryManager::deviceAlloc(size_t Size, int DeviceID) {
+size_t MemoryManager::getSegmentSpace(int Rank) {
+  return SegInfo[Rank].SegSize;
+}
+
+void *MemoryManager::getSegmentAddr(int Rank) {
+  return SegInfo[Rank].SegStart;
+}
+
+size_t MemoryManager::getAvailableSize(){
+  uintptr_t Start = reinterpret_cast<uintptr_t>(LocalSegStart);
+  uintptr_t End = Start + LocalSegSize;
+  if (End < Start) {
+    return 0; // Handle overflow
+  }
+  return static_cast<size_t>(End - Start);
+}
+
+size_t MemoryManager::getOffset(void *Ptr, int Rank) {
+  uintptr_t Start = reinterpret_cast<uintptr_t>(SegInfo[Rank].SegStart);
+  uintptr_t ptr = reinterpret_cast<uintptr_t>(Ptr);
+
+  if (ptr < Start || ptr > Start + SegInfo[Rank].SegSize) {
+    return static_cast<size_t>(-1);
+  }
+
+  return static_cast<size_t>(ptr - Start);
+}
+
+void *MemoryManager::convertRemotetoLocalAddr(void *Ptr, int Rank) {
+  uintptr_t RemoteOffset = reinterpret_cast<uintptr_t>(Ptr) -
+                           reinterpret_cast<uintptr_t>(getSegmentAddr(Rank));
+  return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(LocalSegStart) +
+                                  RemoteOffset);
+}
+
+
+
+#ifdef DIOMP_ENABLE_CUDA
+// CUDA Memory Manager implementation
+CUDAMemoryManager::CUDAMemoryManager(gex_TM_t gexTeam, int Mode) 
+    : MemoryManager(gexTeam, Mode) {
+  int targetDevicesNum = omp_get_num_devices();
+  if (Mode != 1) {
+    LocalRank = MyRank % targetDevicesNum;
+    targetDevicesNum = 1;
+  } else {
+    LocalRank = 0;
+  }
+
+  DeviceEPs.resize(targetDevicesNum);
+  gex_MK_Create_args_t args;
+  args.gex_flags = 0;
+  args.gex_class = GEX_MK_CLASS_CUDA_UVA;
+  
+  gex_MK_t mk_array[targetDevicesNum];
+  void *tmp = nullptr;
+  
+  // Create and bind local segments for each device
+  for (int DeviceID = 0; DeviceID < targetDevicesNum; DeviceID++) {
+    gex_EP_t DeviceEP;
+    args.gex_args.gex_class_cuda_uva.gex_CUdevice = DeviceID + LocalRank;
+    GASNET_Safe(gex_MK_Create(&mk_array[DeviceID], diompClient, &args, 0));
+    
+    void *DeviceSegAddr = omp_target_alloc(LocalSegSize, DeviceID + LocalRank);
+    tmp = DeviceSegAddr;
+    
+    gex_Segment_t DeviceSeg = GEX_SEGMENT_INVALID;
+    GASNET_Safe(gex_Segment_Create(&DeviceSeg, diompClient, DeviceSegAddr,
+                                  LocalSegSize, mk_array[DeviceID], 0));
+    
+    GASNET_Safe(gex_EP_Create(&DeviceEP, diompClient, GEX_EP_CAPABILITY_RMA, 0));
+    GASNET_Safe(gex_EP_BindSegment(DeviceEP, DeviceSeg, 0));
+    GASNET_Safe(gex_EP_PublishBoundSegment(diompTeam, &DeviceEP, 1, 0));
+    DeviceEPs[DeviceID] = DeviceEP;
+  }
+
+  // Initialize device segment info
+  DeviceSegInfo.resize(RanksNum, std::vector<gex_DeviceSeginfo_t>(targetDevicesNum));
+  for (int Rank = 0; Rank < RanksNum; Rank++) {
+    for (int DeviceID = 0; DeviceID < targetDevicesNum; DeviceID++) {
+      DeviceSegInfo[Rank][DeviceID].SegStart = nullptr;
+      DeviceSegInfo[Rank][DeviceID].SegRemain = nullptr;
+      DeviceSegInfo[Rank][DeviceID].SegSize = 0;
+    }
+  }
+
+  // Setup CUDA IPC
+  if (Mode != 1) {
+    for (int DeviceID = 0; DeviceID < omp_get_num_devices(); DeviceID++) {
+      if (DeviceID == LocalRank) continue;
+      
+      CUDACHECK(cudaSetDevice(LocalRank));
+      cudaDeviceEnablePeerAccess(DeviceID, 0);
+      CUDACHECK(cudaSetDevice(DeviceID));
+      cudaDeviceEnablePeerAccess(LocalRank, 0);
+    }
+  }
+}
+
+void *CUDAMemoryManager::deviceAlloc(size_t Size, int DeviceId) {
+  if (Mode != 1) {
+    DeviceId = 0;
+  }
+
   // Assuming tmpRemain is a class member variable, initialized to 0
   static const size_t ALIGNMENT = 16; // Example: 16-byte alignment
   static uintptr_t MaxAddr = 0;       // Tracks the maximum allowed address
 
   // Initialize tmpRemain if it is uninitialized
   if (tmpRemain == 0) {
-    void *Res = getDeviceSegmentAddr(MyRank, DeviceID);
+    void *Res = getDeviceSegmentAddr(MyRank, DeviceId);
     if (!Res) {
       THROW_ERROR("Failed to get device segment address");
     }
@@ -145,67 +166,69 @@ void *MemoryManager::deviceAlloc(size_t Size, int DeviceID) {
   return reinterpret_cast<void *>(Res);
 }
 
-void MemoryManager::deviceDealloc() {
+void CUDAMemoryManager::deviceDealloc() {
   tmpRemain = reinterpret_cast<uintptr_t>(nullptr);
 }
 
-size_t MemoryManager::getDeviceOffset(void *Ptr) {
+void *CUDAMemoryManager::getDeviceSegmentAddr(int Rank, int DeviceID) {
+  if (Mode != 1) {
+    DeviceID = 0;
+  }
+  if (DeviceSegInfo[Rank][DeviceID].SegStart == nullptr) {
+    gex_EP_Index_t TargetEPIdx = gex_EP_QueryIndex(DeviceEPs[DeviceID]);
+    gex_TM_t TargetTM = gex_TM_Pair(DeviceEPs[0], TargetEPIdx);
+    gex_Event_Wait(gex_EP_QueryBoundSegmentNB(
+        TargetTM, Rank, &DeviceSegInfo[Rank][DeviceID].SegStart, nullptr,
+        &DeviceSegInfo[Rank][DeviceID].SegSize, 0));
+    DeviceSegInfo[Rank][DeviceID].SegRemain =
+        DeviceSegInfo[Rank][DeviceID].SegStart;
+  }
+  return DeviceSegInfo[Rank][DeviceID].SegStart;
+}
+
+size_t CUDAMemoryManager::getDeviceOffset(void *Ptr) {
   uintptr_t LocalBase =
       reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(MyRank, 0));
   uintptr_t LocalOffset = reinterpret_cast<uintptr_t>(Ptr) - LocalBase;
   return (size_t)LocalOffset;
 }
 
-size_t MemoryManager::getDeviceAvailableSize() const {
-  uintptr_t Start = reinterpret_cast<uintptr_t>(LocalSegStart);
-  uintptr_t End = Start + LocalSegSize;
-  if (End < Start) {
-    return 0; // Handle overflow
-  }
-  return static_cast<size_t>(End - Start);
+void *CUDAMemoryManager::convertLocaltoRemoteAddr(void *Ptr, int Rank, int DeviceId) {
+    uintptr_t LocalBase =
+      reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(MyRank, DeviceId));
+  uintptr_t LocalOffset = reinterpret_cast<uintptr_t>(Ptr) - LocalBase;
+  return reinterpret_cast<void *>(
+      reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(Rank, DeviceId)) +
+      LocalOffset);
 }
 
-size_t MemoryManager::getAvailableSize() const {
-  uintptr_t Start = reinterpret_cast<uintptr_t>(LocalSegStart);
-  uintptr_t End = Start + LocalSegSize;
-  if (End < Start) {
-    return 0; // Handle overflow
-  }
-  return static_cast<size_t>(End - Start);
+void *CUDAMemoryManager::convertRemotetoLocalAddr(void *Ptr, int Rank, int DeviceId) {
+  uintptr_t RemoteBase =
+      reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(Rank, DeviceId));
+  uintptr_t RemoteOffset = reinterpret_cast<uintptr_t>(Ptr) - RemoteBase;
+  return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(LocalSegStart) +
+                                  RemoteOffset);
 }
 
-size_t MemoryManager::getOffset(void *Ptr) {
-  uintptr_t Start = reinterpret_cast<uintptr_t>(LocalSegStart);
+size_t CUDAMemoryManager::getOffset(void *Ptr, int Rank, int DeviceId) {
+  uintptr_t Start = reinterpret_cast<uintptr_t>(getDeviceSegmentAddr(Rank, DeviceId));
   uintptr_t ptr = reinterpret_cast<uintptr_t>(Ptr);
 
-  if (ptr < Start || ptr > Start + LocalSegSize) {
+  if (ptr < Start || ptr > Start + getSegmentSpace(Rank)) {
     return static_cast<size_t>(-1);
   }
 
   return static_cast<size_t>(ptr - Start);
 }
 
-size_t MemoryManager::getOffset(void *Ptr, int Rank) {
-  uintptr_t Start = reinterpret_cast<uintptr_t>(SegInfo[Rank].SegStart);
-  uintptr_t ptr = reinterpret_cast<uintptr_t>(Ptr);
-
-  if (ptr < Start || ptr > Start + SegInfo[Rank].SegSize) {
-    return static_cast<size_t>(-1);
-  }
-
-  return static_cast<size_t>(ptr - Start);
+gex_EP_t CUDAMemoryManager::getEP(int DeviceId) {
+  return DeviceEPs[DeviceId];
 }
 
-bool MemoryManager::validGlobalAddr(void *Ptr, int Rank) {
-  if (!Ptr) {
-    return false;
-  }
-
-  size_t Offset = reinterpret_cast<char *>(Ptr) -
-                  reinterpret_cast<char *>(SegInfo[Rank].SegStart);
-  return Offset <= SegInfo[Rank].SegSize;
+cudaIpcMemHandle_t CUDAMemoryManager::getIpcHandle(int Rank) {
+  return IpcHandles[Rank];
 }
 
-gex_EP_t MemoryManager::getEP(int DeviceID) { return DeviceEPs[DeviceID]; }
+#endif // DIOMP_ENABLE_CUDA
 
 } // namespace diomp
